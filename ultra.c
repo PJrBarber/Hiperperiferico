@@ -1,147 +1,208 @@
-#include <stdio.h>
-#include <stdlib.h>
+// Includes necessários
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
-#include "hardware/uart.h"
-#include "ssd1306.h"
+#include "hardware/adc.h"
+#include "pico/binary_info.h"
+#include "hardware/gpio.h"
+#include "bsp/board.h"
+#include "tusb.h"
+#include <string.h>
+#include <stdio.h>
 
-// Definindo os pinos
-#define BUTTON_A_PIN  15
-#define BUTTON_B_PIN  16
-#define JOYSTICK_X_PIN  26
-#define JOYSTICK_Y_PIN  27
-#define JOYSTICK_BTN_PIN  22
-#define UART_TX_PIN  0
-#define UART_RX_PIN  1
-#define SDA_PIN  4
-#define SCL_PIN  5
+// Definições dos pinos
+#define OLED_SDA 14
+#define OLED_SCL 15
+#define BUTTON_A 5
+#define BUTTON_B 6
+#define JOYSTICK_X 26
+#define JOYSTICK_Y 27
+#define JOYSTICK_BTN 22
 
-// Declarações das variáveis globais
-int joystick_x_pos = 0;
-int joystick_y_pos = 0;
+// Constantes do display OLED
+#define OLED_ADDR 0x3C
+#define OLED_WIDTH 128
+#define OLED_HEIGHT 64
 
-// Função para inicializar I2C para comunicação com o display OLED
-void init_i2c_display() {
-    i2c_init(i2c0, 100000);  // Inicializa o I2C com a frequência de 100 kHz
-    gpio_set_function(SDA_PIN, GPIO_FUNC_I2C);
-    gpio_set_function(SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(SDA_PIN);  // Ativa o pull-up para o SDA
-    gpio_pull_up(SCL_PIN);  // Ativa o pull-up para o SCL
+// Estados do sistema
+typedef enum {
+    STATE_INIT,
+    STATE_READY,
+    STATE_LISTENING,
+    STATE_SPEAKING,
+    STATE_IN_USE
+} SystemState;
+
+// Estrutura para controle do cursor
+typedef struct {
+    int8_t x;
+    int8_t y;
+    uint8_t buttons;
+} MouseReport;
+
+// Variáveis globais
+SystemState currentState = STATE_INIT;
+MouseReport mouseReport = {0, 0, 0};
+bool mouse_mounted = false;
+
+// Protótipos das funções
+void init_i2c(void);
+void init_gpio(void);
+void init_adc(void);
+bool init_system(void);
+void update_display(const char* message);
+void process_joystick(void);
+void handle_buttons(void);
+void send_hid_report(void);
+
+// Função para inicialização do USB HID
+void init_usb_hid(void) {
+    board_init();
+    tusb_init();
 }
 
-// Função para inicializar UART para comunicação Bluetooth
-void init_uart_bluetooth() {
-    uart_init(uart0, 9600);  // Inicializa UART com uma taxa de 9600 bauds
-    gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);  // Configura o pino TX para UART
-    gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);  // Configura o pino RX para UART
+// Função de inicialização do I2C
+void init_i2c(void) {
+    i2c_init(i2c1, 400000);
+    gpio_set_function(OLED_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(OLED_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(OLED_SDA);
+    gpio_pull_up(OLED_SCL);
 }
 
-// Função para inicializar os pinos dos botões
-void init_buttons() {
-    gpio_set_function(BUTTON_A_PIN, GPIO_FUNC_INPUT);
-    gpio_set_function(BUTTON_B_PIN, GPIO_FUNC_INPUT);
-    gpio_pull_up(BUTTON_A_PIN);  // Configura o pull-up para o botão A
-    gpio_pull_up(BUTTON_B_PIN);  // Configura o pull-up para o botão B
+// Função de inicialização dos GPIOs
+void init_gpio(void) {
+    gpio_init(BUTTON_A);
+    gpio_init(BUTTON_B);
+    gpio_init(JOYSTICK_BTN);
+    
+    gpio_set_dir(BUTTON_A, GPIO_IN);
+    gpio_set_dir(BUTTON_B, GPIO_IN);
+    gpio_set_dir(JOYSTICK_BTN, GPIO_IN);
+    
+    gpio_pull_up(BUTTON_A);
+    gpio_pull_up(BUTTON_B);
+    gpio_pull_up(JOYSTICK_BTN);
 }
 
-// Função para ler a posição X e Y do joystick
-void read_joystick(int &x_pos, int &y_pos) {
-    x_pos = gpio_get(JOYSTICK_X_PIN);  // Leitura do eixo X
-    y_pos = gpio_get(JOYSTICK_Y_PIN);  // Leitura do eixo Y
+// Função de inicialização do ADC
+void init_adc(void) {
+    adc_init();
+    adc_gpio_init(JOYSTICK_X);
+    adc_gpio_init(JOYSTICK_Y);
 }
 
-// Função para verificar se o botão do joystick foi pressionado
-bool is_joystick_pressed() {
-    return (gpio_get(JOYSTICK_BTN_PIN) == 0);  // Retorna verdadeiro se o botão for pressionado
-}
-
-// Função para verificar se um botão foi pressionado com debounce
-bool is_button_pressed(int button_pin) {
-    bool state = gpio_get(button_pin) == 0;  // Verifica se o botão está pressionado
-    if (state) {
-        sleep_ms(50);  // Pequeno delay para debounce
+// Função de inicialização do sistema
+bool init_system(void) {
+    stdio_init_all();
+    init_i2c();
+    init_gpio();
+    init_adc();
+    init_usb_hid();
+    
+    bool system_ok = true;
+    
+    if (system_ok) {
+        update_display("Ola! Vamos iniciar.");
+        currentState = STATE_READY;
+        return true;
+    } else {
+        update_display("Erro no sistema!");
+        return false;
     }
-    return state;
 }
 
-// Função para atualizar o display com uma mensagem
-void update_display(const char* message, int x = 0, int y = 0) {
-    ssd1306_clear_screen();  // Limpa a tela
-    ssd1306_draw_string(x, y, message);  // Desenha a string na tela
-    ssd1306_display();  // Atualiza o display com as novas informações
+// Função para atualizar o display (simulada)
+void update_display(const char* message) {
+    // Aqui seria implementada a lógica real do display OLED
+    printf("Display: %s\n", message);
 }
 
-// Função para enviar dados via Bluetooth (UART)
-void send_bluetooth_data(const char* data) {
-    uart_puts(uart0, data);  // Envia a string via Bluetooth
+// Função para processar entradas do joystick
+void process_joystick(void) {
+    adc_select_input(0);
+    uint16_t x = adc_read();
+    adc_select_input(1);
+    uint16_t y = adc_read();
+    
+    // Converte leituras ADC para movimentos do cursor
+    mouseReport.x = (x > 2048) ? 5 : (x < 1024) ? -5 : 0;
+    mouseReport.y = (y > 2048) ? 5 : (y < 1024) ? -5 : 0;
 }
 
-// Função para receber dados via Bluetooth (UART)
-void receive_bluetooth_data(char* buffer, int max_size) {
-    int i = 0;
-    while (uart_is_readable(uart0) && i < max_size - 1) {
-        buffer[i++] = uart_getc(uart0);  // Lê um caractere
+// Função para processar botões
+void handle_buttons(void) {
+    // Botão esquerdo do mouse
+    if (!gpio_get(BUTTON_A)) {
+        mouseReport.buttons |= MOUSE_BUTTON_LEFT;
+    } else {
+        mouseReport.buttons &= ~MOUSE_BUTTON_LEFT;
     }
-    buffer[i] = '\0';  // Adiciona o caractere nulo ao final da string
+    
+    // Botão direito do mouse
+    if (!gpio_get(BUTTON_B)) {
+        mouseReport.buttons |= MOUSE_BUTTON_RIGHT;
+    } else {
+        mouseReport.buttons &= ~MOUSE_BUTTON_RIGHT;
+    }
 }
 
-// Função para mover o cursor com base na posição do joystick
-void move_cursor_with_joystick(int x_pos, int y_pos) {
-    // Aqui você pode implementar a lógica para mover o cursor ou realizar alguma ação
-    // De acordo com a posição dos eixos X e Y do joystick
+// Função para enviar relatório HID
+void send_hid_report(void) {
+    if (tud_mounted() && tud_hid_ready()) {
+        tud_hid_mouse_report(REPORT_ID_MOUSE, 
+                            mouseReport.buttons,
+                            mouseReport.x,
+                            mouseReport.y,
+                            0,  // wheel
+                            0); // pan
+    }
 }
 
-// Função para inicializar o display OLED
-void init_display() {
-    ssd1306_init();  // Inicializa o display OLED
-    update_display("Inicializando...");  // Exibe uma mensagem inicial
-}
-
-int main() {
-    // Inicializações
-    init_i2c_display();  // Inicializa o display OLED via I2C
-    init_uart_bluetooth();  // Inicializa a UART para Bluetooth
-    init_buttons();  // Inicializa os botões
-    init_display();  // Inicializa o display OLED
-
-    // Variáveis locais
-    char bt_buffer[100];  // Buffer para dados do Bluetooth
-    int x_pos, y_pos;
-
-    // Loop principal
+// Função principal
+int main(void) {
+    if (!init_system()) {
+        return -1;
+    }
+    
+    update_display("Pronto pra uso");
+    
     while (true) {
-        // Lê a posição do joystick
-        read_joystick(x_pos, y_pos);
-
-        // Movimenta o cursor com base no joystick
-        move_cursor_with_joystick(x_pos, y_pos);
-
-        // Verifica se o botão A foi pressionado para simular clique do mouse
-        if (is_button_pressed(BUTTON_A_PIN)) {
-            // Ação para clicar
-            update_display("Ação de Clique", 0, 10);
+        tud_task(); // Tarefa USB
+        
+        if (tud_mounted()) {
+            if (!mouse_mounted) {
+                mouse_mounted = true;
+                update_display("Mouse conectado");
+            }
+            
+            process_joystick();
+            handle_buttons();
+            send_hid_report();
+        } else {
+            if (mouse_mounted) {
+                mouse_mounted = false;
+                update_display("Mouse desconectado");
+            }
         }
-
-        // Verifica se o botão B foi pressionado para comunicar com o smartphone
-        if (is_button_pressed(BUTTON_B_PIN)) {
-            // Ação para comunicação com smartphone via Bluetooth
-            send_bluetooth_data("Mensagem para smartphone");
-        }
-
-        // Verifica se o joystick foi pressionado
-        if (is_joystick_pressed()) {
-            // Ação para pressionamento do joystick
-            update_display("Joystick pressionado", 0, 20);
-        }
-
-        // Recebe dados do Bluetooth (se houver)
-        receive_bluetooth_data(bt_buffer, sizeof(bt_buffer));
-        if (bt_buffer[0] != '\0') {
-            update_display(bt_buffer);  // Exibe a mensagem recebida do Bluetooth
-        }
-
-        sleep_ms(10);  // Pequeno delay para evitar sobrecarga do loop
+        
+        sleep_ms(10); // Pequeno delay para estabilidade
     }
-
+    
     return 0;
+}
+
+// Callbacks necessários para USB HID
+void tud_mount_cb(void) {
+    mouse_mounted = true;
+}
+
+void tud_umount_cb(void) {
+    mouse_mounted = false;
+}
+
+void tud_suspend_cb(bool remote_wakeup_en) {
+    (void) remote_wakeup_en;
+}
+
+void tud_resume_cb(void) {
 }
